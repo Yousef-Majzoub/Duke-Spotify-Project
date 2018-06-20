@@ -1,0 +1,473 @@
+---
+title: "LDOC"
+author: "Team Spotify"
+output: rmarkdown::html_document
+runtime: shiny
+---
+
+<br/><br/>
+
+### Project Background
+
+The main objective of this project is to create a shiny app that benchmarks a selected LDOC artist against other LDOC artists of the same year and against the entire historical record of LDOC artists. All artists are compared against one another using the top 5 songs of each artists currently based on the criterion of popularity. However, with respect to the benchmarking exercise, we based our analysis on the following song features: (1) Danceability, (2) Energy, (3) Speechiness, (4) Acousticness, (5) Valence, and (6) Lyric Uniqueness.
+
+<br/>
+
+```{r echo = FALSE, message = FALSE, warning = FALSE}
+
+#Installing necessary packages
+
+if (!"spotifyr" %in% row.names(installed.packages()))
+  devtools::install_github("charlie86/spotifyr")
+
+if (!"tidyverse" %in% row.names(installed.packages()))
+  install.packages("tidyverse", repos = "https://cran.rstudio.com/")
+
+if (!"shinythemes" %in% row.names(installed.packages()))
+  install.packages("shinythemes", repos = "https://cran.rstudio.com/")
+
+if (!"fmsb" %in% row.names(installed.packages()))
+  install.packages("fmsb", repos = "https://cran.rstudio.com/")
+
+if (!"plotly" %in% row.names(installed.packages()))
+  devtools::install_github("ropensci/plotly")
+
+if (!"stringdist" %in% row.names(installed.packages()))
+  install.packages("stringdist", repos = "https://cran.rstudio.com/")
+
+if (!"devtools" %in% row.names(installed.packages()))
+  install.packages("devtools", repos = "https://cran.rstudio.com/")
+
+if (!"rlist" %in% row.names(installed.packages()))
+  install.packages("rlist", repos = "https://cran.rstudio.com/")
+
+if (!"geniusR" %in% row.names(installed.packages()))
+  devtools::install_github("josiahparry/geniusR")
+
+if (!(packageVersion("plotly") == "4.7.1.9000"))
+  devtools::install_github("ropensci/plotly")
+
+#Loading necessary packages
+
+library(spotifyr)
+library(tidyverse)
+library(shiny)
+library(shinythemes)
+library(fmsb)
+library(plotly)
+library(jsonlite)
+library(glue)
+library(magrittr)
+library(stringr)
+library(dplyr)
+library(rlist)
+
+#Loading necessary keys
+
+MUSIXMATCH_API_KEY = "e548b2085bdc0899babb6bf079158faa"
+
+Sys.setenv(SPOTIFY_CLIENT_ID = 'd528f170ebdf41b9adf3f0b25a0484e0')
+Sys.setenv(SPOTIFY_CLIENT_SECRET = '259a218c1eff414cad4c8ca5cf00ac94')
+
+access_token = get_spotify_access_token()
+
+```
+
+#### Task 1 - Working with MusixMatch (Lyrics)
+
+We worked with MusixMatch, an online lyrics database with an API to inquire lyrics by songs, to derive a score for the last song feature mentioned above; "Lyric Uniqueness."  
+
+1. Function to Get Data from 'MusixMatch': in this section we created a function that utilizes the MusixMatch API to obtain th lyrics of a track of our choice on Sportify.
+
+```{r message = FALSE, warning = FALSE}
+
+# Function that gets data from 'MusixMatch': this function takes in a track of interest on Sportify, extracts metrics to feed into the MusixMatch API to return its lyrics if applicable. 
+
+get_lyrics = function(spotify_track) {
+  artist_name = spotify_track$artist_name
+  track_name =  spotify_track$track_name
+  album_name = spotify_track$album_name
+  url = glue('http://api.musixmatch.com/ws/1.1/track.search?q_artist={artist_name}&q_track={track_name}&s_track_rating=desc&apikey={MUSIXMATCH_API_KEY}')
+  
+  print(url)
+  
+  response = read_json(URLencode(url))
+  
+  # API error: returns an error message if the results from the API exhibits incorrect status code
+  if (response$message$header$status_code != 200) {
+    stop(
+      glue("Got {response$message$header$status_code} instead of 200 for track lookup")
+    )
+  }
+  
+  # No song was found: returns an error message if MusixMacth does not have the lyrics of the track of interest 
+  if (length(response$message$body$track_list) == 0) {
+    stop("Couldn't find tracks!")
+  }
+
+  # Extracts the track id from the API response to generate a new API inquiry for the track's lyrics 
+  track_id = response$message$body$track_list[[1]]$track$track_id
+  lyrics_url = glue('http://api.musixmatch.com/ws/1.1/track.lyrics.get?track_id={track_id}&apikey={MUSIXMATCH_API_KEY}')
+  
+  lyrics_response = read_json(URLencode(lyrics_url))
+  
+  # API error: returns an error message if the results from the API exhibits incorrect status code
+  if (lyrics_response$message$header$status_code != 200) {
+    glue("Got {lyrics_response$message$header$status_code} instead of 200 for lyrics lookup")
+  }
+  # Extract the lyrics of the track from the API response 
+  lyrics_response$message$body$lyrics$lyrics_body
+}
+
+```
+
+2. Function to Clean Lyrics to be used for Scoring Uniqueness: this function parses the lyrics of the track of interest, obtained from the MusixMatch API, by removing redundant parts to prepare for uniqueness analysis.
+
+```{r message = FALSE, warning = FALSE}
+
+clean_lyrics = function(lyrics) {
+  words = lyrics %>%
+    tolower() %>% 
+    str_replace('this lyrics is not for commercial use', '') %>% # delete non-lyrics text 
+    str_replace_all('[\\s]+', ' ') %>% # deletes third-person singular "s"
+    str_replace_all('[^a-z ]', '') %>% # deletes punctuations
+    str_replace_all('[\\s]+', ' ') %>% # deletes remaining "s" that are redundant 
+    trimws() %>%
+    str_split(' ')
+  
+  # Words ends up being a list of length 1, so we unwrap it here
+  words[[1]]
+}
+
+```
+
+3. Function to Score Lyric Uniqueness Based on the Number of Unique Words
+
+```{r message = FALSE, warning = FALSE}
+
+# Function to Score Lyrics
+
+score_lyrics = function(words) {
+  length(unique(words)) / length(words)
+}
+
+```
+
+4. Final Function used to Score Selected Tracks of LDOC Artists
+
+```{r message = FALSE, warning = FALSE}
+
+# Function to Score Selected Tracks
+
+score_tracks = function(tracks) {
+  scores = rep(NA, nrow(tracks))
+  for (row in 1:nrow(tracks)) {
+    track = tracks[row,]
+    tryCatch({
+      scores[row] = get_lyrics(track) %>% clean_lyrics() %>% score_lyrics()
+    }, error = function(cond) {
+      scores[row] = NA
+    })
+  }
+  scores
+}
+
+```
+
+#### Task 2 - Working with Spotify (Spotifyr)
+
+Sportifyr is a package that includes a range of functions for obtaining data from the Sportify API. The second part of our project starts from constructing a dataframe for all the LDOC artists. It then utilizes functions in Sportifyr to first obtain the unique ID of the artists to extract the characteristics of him/her and of his/her top five songs. We then derive the six metrics of interest ((1) Danceability, (2) Energy, (3) Speechiness, (4) Acousticness, (5) Valence, and (6) Lyric Uniqueness) of these tracks and benchmark them against the top five songs in their respective years. This section outputs a dataset of the top LDOC hits with their characteristics as well as a radar chart to present the data in our shiny app. This section also cleans up the dataframe by removing artist with no available data along the way. 
+
+1. Read in list of LDOC Artists
+
+```{r message = FALSE, warning = FALSE}
+
+# Read in CSV File (df)
+
+df = read.csv("LDOC_data.csv")
+
+# Get list of artists
+
+artists = df["Artist"]
+
+```
+
+2. Function to Get Unique ID for each LDOC Artist: this function intakes an artist's name, returns null if he/she is not on Sportify and returns his/her Unique ID if otherwise, which is the first item in the results of the get_artists function.
+
+```{r message = FALSE, warning = FALSE}
+
+# Function to get unique spotify ID for LDOC artists
+
+get_unique_id = function(x) {
+  if (length(get_artists(x)) == 0) {
+    NULL
+  } else {
+      get_artists(x) %>%
+      .$artist_uri %>%
+      as.character() %>%
+      .[[1]] %>%
+      unlist()
+  }
+}
+
+```
+
+3. Functions to Get Artist Audio Features and Top Songs: this function uses the unique ID of the artist to obtain his/her audio features and the top five songs 
+
+```{r message = FALSE, warning = FALSE}
+
+# Function to get song features for artist
+
+get_features = function(x) {
+  get_artist_audio_features(artist_uri = x, use_artist_uri = TRUE)
+}
+
+get_songs = function(x) {
+  tryCatch(get_features(x), error = function(cond) {
+    return(NA)
+  })
+}
+
+# Function to get top 5 songs and selected features
+
+get_top5 = function(x) {
+  x %>%
+    arrange(desc(track_popularity)) %>%
+    head(5)
+}
+
+```
+
+4. Incorporating Lyric Uniqueness Score and Finalizing Audio Features: this function takes the feedback from the Sportify API to obtain its uniqueness score and insert the results into the dataset It also selects which variables to retan for the final datase that is displayed and used in the app. 
+
+```{r message = FALSE, warning = FALSE}
+
+get_final_features = function(x) {
+  lyric_uniqueness = x %>% score_tracks()
+  x$lyric_uniqueness = lyric_uniqueness
+  x %>% select("artist_uri", "track_name", "track_popularity", "danceability", "energy", "speechiness", 
+               "acousticness", "liveness", "valence", "lyric_uniqueness", "track_preview_url") %>%
+    dplyr::rename("unique_ids" = "artist_uri")
+}
+
+```
+
+5. Clean up dataset by removing LDOC artists with no available information on spotify
+
+```{r message = FALSE, warning = FALSE}
+
+# Check if Spotifyr has Unique IDs for all LDOC Artists
+
+if(file.exists("unique_ids.rds")) {
+  unique_ids = readRDS("unique_ids.rds")
+} else {
+  unique_ids = map_chr(artists$Artist, function(x) get_unique_id(x))
+  list.save(unique_ids, "unique_ids.rds")
+}
+
+# Check if Spotifyr has Songs for all LDOC Artists
+
+if(file.exists("unique_songs.rds")) {
+  unique_songs = readRDS("unique_songs.rds")
+} else {
+  unique_songs = map(unique_ids, function(x) get_songs(x))
+  list.save(unique_songs, "unique_songs.rds")
+}
+
+# Add ids and song_absent to LDOC dataframe (df)
+
+ids = data_frame(unique_ids)
+
+artist_songs = {
+  data_frame(
+    songs_absent = map(unique_songs, function(x) is.na(x))
+  )
+}
+
+df = bind_cols(df, ids, artist_songs)
+
+# Drop artists not available on Spotify
+
+df = {
+  df %>%
+    filter(unique_ids != "NULL") %>%
+    filter(songs_absent != "TRUE") %>%
+    select(-songs_absent)
+}
+
+```
+
+6. Function to Get Top Songs in the Respective Year (Benchmarking with other LDOC Artists)
+
+```{r message = FALSE, warning = FALSE}
+
+# Create Dataframe for Annual Top Tracks for Corresponding Year (top_annual)
+
+get_top_annual = function(year) {
+  top_annual = {
+    map_dfr(df[df$Year == year, "Artist"], function(x) 
+      get_unique_id(x) %>% get_songs() %>% get_top5() %>% get_final_features())
+  }
+  return(top_annual)
+}
+
+```
+
+7. Create a Dataframe of Top Songs of all LDOC Artists (2010 - 2018)
+
+```{r message = FALSE, warning = FALSE}
+
+# Create Dataframe of LDOC Historical Top Tracks (top_ldoc)
+
+if(file.exists("top_ldoc.rds")) {
+  top_ldoc = readRDS("top_ldoc.rds")
+} else {
+  top_ldoc = {
+    map_dfr(df$Artist, 
+            function(x) get_unique_id(x) %>% get_songs() %>% get_top5() %>% get_final_features())
+  }
+  top_ldoc = inner_join(df, top_ldoc, by = "unique_ids")
+  saveRDS(top_ldoc, "top_ldoc.rds")
+}
+
+```
+
+8. Function to Create Radar Chart of Song Features
+
+```{r message = FALSE, warning = FALSE}
+
+# Radar Chart for Benchmarking Selected Artist Song Features with other Artists of Same Year
+
+get_radar_chart = function(top_ldoc, top_annual, top5) {
+  radar_chart = {
+    plot_ly(
+      type = "scatterpolar",
+      fill = "toself",
+      mode = "markers",
+      
+      # Bottom Trace
+      
+      r = c(mean(top_ldoc$danceability), mean(top_ldoc$energy), mean(top_ldoc$speechiness), 
+            mean(top_ldoc$liveness), mean(top_ldoc$valence), 
+            mean(top_ldoc$lyric_uniqueness, na.rm = TRUE)),
+      theta = c("Danceability", "Energy", "Speechiness", "Liveness", "Valence", 
+                "Lyric Uniqueness"),
+      name = "Historical LDOC Average",
+      opacity = 0.7) %>%
+      
+      # Middle Trace
+      
+      add_trace(
+        r = c(mean(top_annual$danceability), mean(top_annual$energy), 
+              mean(top_annual$speechiness), mean(top_annual$liveness), 
+              mean(top_annual$valence), mean(top_annual$lyric_uniqueness, na.rm = TRUE)),
+        theta = c("Danceability", "Energy", "Speechiness", "Liveness", "Valence", 
+                  "Lyric Uniqueness"),
+        name = "LDOC Annual Average",
+        opacity = 0.7) %>%
+      
+      # Top Trace
+      
+      add_trace(
+        r = c(mean(top5$danceability), mean(top5$energy), mean(top5$speechiness), 
+              mean(top5$liveness), mean(top5$valence), mean(top5$lyric_uniqueness, na.rm = TRUE)),
+        theta = c("Danceability", "Energy", "Speechiness", "Liveness", "Valence", 
+                  "Lyric Uniqueness"),
+        name = "Selected Artist",
+        opacity = 0.7) %>%
+      
+      # Layout Features
+      
+      layout(
+        polar = list(
+          radialaxis = list(
+            visible = T,
+            range = c(0,1))),
+        showlegend = T
+      )
+  }
+  return(radar_chart)
+}
+
+```
+
+
+#### Task 3 - Building Shiny App
+
+The final section of our project creates a shiny app to present our findings. The shiny app allows users to select an artist from the list of LDOC performers. After hitting the "go" button, the shiny app generates (1) a radar chart visualizing the relative scores in our six metrics of the top five songs by the artist (2) a table that shows the same data adn (3) the name of the artist on top of the main pane. The app will also show a picture of the artist and play a sample of the artist's most popular song.   
+
+```{r message = FALSE, warning = FALSE}
+
+shinyApp(
+  ui = fluidPage(
+    theme = shinytheme("cosmo"),
+    navbarPage("LDOCify", collapsible = TRUE,
+               sidebarLayout(
+                 sidebarPanel(
+                   selectInput("artist", "Artist", choices = df["Artist"]),
+                   actionButton("go", "Go", icon("refresh")),
+                   align="center",
+                   htmlOutput("picture"),
+                   htmlOutput("sample")
+                 ),
+                 mainPanel(
+                   # Output Artist Name
+                   fluidRow(h2(textOutput("artist")),align='center'),
+                   # Output Radar Graph
+                   plotlyOutput("plotTop5"),
+                   # Output Artist Top5 Table
+                   tableOutput("tableTop5")
+                 )
+               )
+    )
+  ),
+  server = function(input, output, session){
+    observeEvent(input$go, {
+      artist = input$artist
+      picture = get_artists(artist)$artist_img[1] %>% c()
+      top5 = top_ldoc %>% filter(Artist == artist)
+      audio_sample = top5$track_preview_url[1]
+      year_choice = df[df$Artist == artist,"Year"]
+      top_annual = top_ldoc %>% filter(Year == year_choice)
+      radar_plot = get_radar_chart(top_ldoc, top_annual, top5)
+      
+      # Outputs
+      
+      # Output Table: Artist Top5 (tableTop5)
+      output$tableTop5 = renderTable({
+        
+        T5 = top5 %>% select(-Year, -Artist, -unique_ids, -track_preview_url)
+        
+        names(T5) = names(T5) %>% str_replace("_", " ") %>% toupper()
+        
+        return(T5 %>% format(justify = "centre"))
+        
+      })
+      
+      # Output Text: Artist's Name
+      output$artist = renderText({artist})
+      
+      # Output Radar Plot: Benchmarking
+      output$plotTop5 = renderPlotly({radar_plot})
+      
+      # Output Image: Artist's Image
+      output$picture = renderText({
+        fluidRow(tags$img(src = picture, height = "200", width = "200", 
+                          style = "margin:50px 0px", alt = "Open in Browser")) %>% 
+          as.character()
+        
+      })
+      
+      # Play Audio Sample
+      output$sample = renderText({
+        if(!is.na(audio_sample)){
+          tags$audio(src = audio_sample, type = "audio/mp3", autoplay = "true") %>%
+            as.character()
+        } else{
+          h3("No Audio Sample Available") %>% as.character()
+        }
+      })
+    })
+  })
+ 
+```
